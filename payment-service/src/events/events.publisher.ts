@@ -12,10 +12,14 @@ import { Refund } from "../refunds/entities/refund.entity";
 export class EventsPublisher implements OnModuleInit {
   private readonly logger = new Logger(EventsPublisher.name);
 
-  constructor(@Inject("PAYMENT_EVENTS_CLIENT") private readonly client: ClientProxy) {}
+  constructor(
+    @Inject("PAYMENT_EVENTS_CLIENT") private readonly client: ClientProxy,
+    @Inject("NOTIFICATION_EVENTS_CLIENT") private readonly notificationClient: ClientProxy,
+  ) {}
 
   async onModuleInit() {
     await this.client.connect();
+    await this.notificationClient.connect();
   }
 
   private emit(eventName: string, data: Record<string, unknown>) {
@@ -53,6 +57,26 @@ export class EventsPublisher implements OnModuleInit {
       refundId: refund.id,
       bookingId: transaction.booking_id,
       amount: refund.amount,
+    });
+  }
+
+  // "Alertas de renovación de paquete de horas" (sección 5.8 del
+  // documento de Notification Service). Va a su propia cola dedicada
+  // (notification_events_queue), no a payment_events_queue -- ningún
+  // consumidor de payment_events_queue existe todavía, pero mezclar aquí
+  // un evento que SÍ tiene consumidor (notification-service) con los que
+  // todavía no lo tienen habría sido confuso.
+  publishPackageLowBalance(data: {
+    packageId: string;
+    studentId: string;
+    hoursRemaining: number;
+    triggeredByBookingId: string;
+  }) {
+    this.logger.log(`Publicando package.low_balance para paquete ${data.packageId}`);
+    return this.notificationClient.emit("package.low_balance", {
+      eventName: "package.low_balance",
+      occurredAt: new Date().toISOString(),
+      data,
     });
   }
 }
