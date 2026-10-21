@@ -25,6 +25,21 @@ import { TransactionsModule } from "../transactions/transactions.module";
           queueOptions: { durable: true },
         },
       },
+      {
+        // Cola de notification-service: "alertas de renovación de paquete
+        // de horas" (sección 5.8 del documento). booking-service también
+        // publica a esta MISMA cola (booking.confirmed) -- compartir una
+        // cola entre dos PRODUCTORES distintos no tiene el problema de
+        // compartirla entre dos consumidores (ver la nota en
+        // booking-service/src/events/events.publisher.ts).
+        name: "NOTIFICATION_EVENTS_CLIENT",
+        transport: Transport.RMQ,
+        options: {
+          urls: [process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672"],
+          queue: "notification_events_queue",
+          queueOptions: { durable: true },
+        },
+      },
     ]),
   ],
   providers: [EventsPublisher],
