@@ -17,6 +17,10 @@ import { RefundTransactionDto } from "./dto/refund-transaction.dto";
 
 const PLATFORM_COMMISSION_RATE = Number(process.env.PLATFORM_COMMISSION_RATE ?? 0.15);
 const POSTGRES_UNIQUE_VIOLATION = "23505";
+// Umbral para la alerta de renovación de paquete (sección 5.8 del
+// documento, Notification Service): a esta cantidad de horas restantes (o
+// menos) se dispara package.low_balance.
+const PACKAGE_LOW_BALANCE_THRESHOLD = Number(process.env.PACKAGE_LOW_BALANCE_THRESHOLD ?? 1);
 
 interface Requester {
   id: string;
@@ -105,6 +109,20 @@ export class TransactionsService {
     if (activePackage) {
       activePackage.hours_remaining -= 1;
       await this.packagesRepo.save(activePackage);
+
+      // "Alertas de renovación de paquete de horas" (sección 5.8 del
+      // documento, Notification Service). Se avisa cuando el saldo queda
+      // EN o POR DEBAJO del umbral, no solo en 0, para que al estudiante
+      // le dé tiempo de renovar antes de quedarse sin horas a mitad de
+      // ciclo.
+      if (activePackage.hours_remaining <= PACKAGE_LOW_BALANCE_THRESHOLD) {
+        this.eventsPublisher.publishPackageLowBalance({
+          packageId: activePackage.id,
+          studentId: activePackage.student_id,
+          hoursRemaining: activePackage.hours_remaining,
+          triggeredByBookingId: data.bookingId,
+        });
+      }
     }
 
     if (saved.status === TransactionStatus.SUCCEEDED) {
