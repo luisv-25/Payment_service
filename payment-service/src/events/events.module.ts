@@ -40,6 +40,18 @@ import { TransactionsModule } from "../transactions/transactions.module";
           queueOptions: { durable: true },
         },
       },
+      {
+        // Cola DEDICADA y NUEVA para analytics-service -- deliberadamente
+        // distinta de "payment_events_queue" (ver nota arriba sobre la colisión
+        // de esa cola con el consumidor de booking.confirmed/cancelled).
+        name: "ANALYTICS_EVENTS_CLIENT",
+        transport: Transport.RMQ,
+        options: {
+          urls: [process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672"],
+          queue: "payment_analytics_queue",
+          queueOptions: { durable: true },
+        },
+      },
     ]),
   ],
   providers: [EventsPublisher],
