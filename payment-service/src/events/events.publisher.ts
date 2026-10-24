@@ -15,20 +15,24 @@ export class EventsPublisher implements OnModuleInit {
   constructor(
     @Inject("PAYMENT_EVENTS_CLIENT") private readonly client: ClientProxy,
     @Inject("NOTIFICATION_EVENTS_CLIENT") private readonly notificationClient: ClientProxy,
+    @Inject("ANALYTICS_EVENTS_CLIENT") private readonly analyticsClient: ClientProxy,
   ) {}
 
   async onModuleInit() {
     await this.client.connect();
     await this.notificationClient.connect();
+    await this.analyticsClient.connect();
   }
 
   private emit(eventName: string, data: Record<string, unknown>) {
-    this.logger.log(`Publicando ${eventName}`);
-    return this.client.emit(eventName, {
-      eventName,
-      occurredAt: new Date().toISOString(),
-      data,
-    });
+  this.logger.log(`Publicando ${eventName}`);
+  const payload = {
+    eventName,
+    occurredAt: new Date().toISOString(),
+    data,
+  };
+  this.client.emit(eventName, payload);
+  return this.analyticsClient.emit(eventName, payload);
   }
 
   publishPaymentSucceeded(transaction: Transaction) {
