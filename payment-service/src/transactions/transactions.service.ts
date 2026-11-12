@@ -11,16 +11,14 @@ import { Transaction, TransactionStatus } from "./entities/transaction.entity";
 import { Package } from "../packages/entities/package.entity";
 import { Refund } from "../refunds/entities/refund.entity";
 import { GatewayClient } from "./gateway.client";
+import { PaypalClient } from "./paypal.client";
+import { VOID_SUFFIX } from "./paypal-payments.service";
 import { CatalogServiceClient } from "./catalog-service.client";
 import { EventsPublisher } from "../events/events.publisher";
 import { RefundTransactionDto } from "./dto/refund-transaction.dto";
 
 const PLATFORM_COMMISSION_RATE = Number(process.env.PLATFORM_COMMISSION_RATE ?? 0.15);
 const POSTGRES_UNIQUE_VIOLATION = "23505";
-// Umbral para la alerta de renovación de paquete (sección 5.8 del
-// documento, Notification Service): a esta cantidad de horas restantes (o
-// menos) se dispara package.low_balance.
-const PACKAGE_LOW_BALANCE_THRESHOLD = Number(process.env.PACKAGE_LOW_BALANCE_THRESHOLD ?? 1);
 
 interface Requester {
   id: string;
@@ -36,6 +34,7 @@ export class TransactionsService {
     @InjectRepository(Package) private readonly packagesRepo: Repository<Package>,
     @InjectRepository(Refund) private readonly refundsRepo: Repository<Refund>,
     private readonly gatewayClient: GatewayClient,
+    private readonly paypalClient: PaypalClient,
     private readonly catalogServiceClient: CatalogServiceClient,
     private readonly eventsPublisher: EventsPublisher,
   ) {}
@@ -80,7 +79,12 @@ export class TransactionsService {
     const amount = activePackage ? 0 : Number(data.priceSnapshot);
     const { commission_rate, commission_amount, tutor_net_amount } = this.splitCommission(amount);
     const gatewayReference = `booking-${data.bookingId}`;
-    const gatewayResult = this.gatewayClient.charge(gatewayReference);
+    // Con PayPal configurado, una sesión que NO se descuenta de un paquete
+    // (amount > 0) queda PENDIENTE hasta que el estudiante pague en el
+    // checkout de PayPal y se confirme la captura. Sin PayPal (o si se
+    // descuenta de un paquete, amount = 0) se procesa en el momento como antes.
+    const awaitsOnlinePayment = this.paypalClient.isConfigured && !activePackage && amount > 0;
+    const gatewayResult = awaitsOnlinePayment ? { succeeded: false } : this.gatewayClient.charge(gatewayReference);
 
     let saved: Transaction;
     try {
@@ -91,7 +95,11 @@ export class TransactionsService {
           student_id: data.studentId,
           tutor_id: tutorUserId,
           amount,
-          status: gatewayResult.succeeded ? TransactionStatus.SUCCEEDED : TransactionStatus.FAILED,
+          status: awaitsOnlinePayment
+            ? TransactionStatus.PENDING
+            : gatewayResult.succeeded
+              ? TransactionStatus.SUCCEEDED
+              : TransactionStatus.FAILED,
           commission_rate,
           commission_amount,
           tutor_net_amount,
@@ -106,26 +114,17 @@ export class TransactionsService {
       throw err;
     }
 
-    if (activePackage) {
-      activePackage.hours_remaining -= 1;
-      await this.packagesRepo.save(activePackage);
+    // Pendiente de pago en línea: no se descuenta nada ni se publica ningún
+    // evento todavía; lo resuelve PaypalPaymentsService al capturar el pago.
+    if (saved.status === TransactionStatus.PENDING) return saved;
 
-      // "Alertas de renovación de paquete de horas" (sección 5.8 del
-      // documento, Notification Service). Se avisa cuando el saldo queda
-      // EN o POR DEBAJO del umbral, no solo en 0, para que al estudiante
-      // le dé tiempo de renovar antes de quedarse sin horas a mitad de
-      // ciclo.
-      if (activePackage.hours_remaining <= PACKAGE_LOW_BALANCE_THRESHOLD) {
-        this.eventsPublisher.publishPackageLowBalance({
-          packageId: activePackage.id,
-          studentId: activePackage.student_id,
-          hoursRemaining: activePackage.hours_remaining,
-          triggeredByBookingId: data.bookingId,
-        });
-      }
-    }
-
+    // La hora del paquete se descuenta SOLO si el cobro salió bien (antes se
+    // descontaba aunque el cobro hubiera fallado).
     if (saved.status === TransactionStatus.SUCCEEDED) {
+      if (activePackage) {
+        activePackage.hours_remaining -= 1;
+        await this.packagesRepo.save(activePackage);
+      }
       this.eventsPublisher.publishPaymentSucceeded(saved);
     } else {
       this.eventsPublisher.publishPaymentFailed(saved);
@@ -139,7 +138,17 @@ export class TransactionsService {
   // el evento se reentrega.
   async refundForBookingCancelled(bookingId: string) {
     const transaction = await this.txRepo.findOne({ where: { booking_id: bookingId } });
-    if (!transaction || transaction.status !== TransactionStatus.SUCCEEDED) return null;
+    if (!transaction) return null;
+
+    // Reserva cancelada antes de pagarse: no hay nada que reembolsar; se
+    // anula la transacción para que ya no se pueda pagar.
+    if (transaction.status === TransactionStatus.PENDING) {
+      transaction.status = TransactionStatus.FAILED;
+      transaction.gateway_reference = `${transaction.gateway_reference}${VOID_SUFFIX}`;
+      await this.txRepo.save(transaction);
+      return null;
+    }
+    if (transaction.status !== TransactionStatus.SUCCEEDED) return null;
 
     const alreadyRefunded = await this.refundsRepo.count({ where: { transaction_id: transaction.id } });
     if (alreadyRefunded > 0) return null;
@@ -171,7 +180,10 @@ export class TransactionsService {
   // paquete -- en este punto todavía no se sabe con qué tutor(es) se usará.
   async chargePackagePurchase(studentId: string, pkg: Package, amount: number) {
     const gatewayReference = `package-${pkg.id}`;
-    const gatewayResult = this.gatewayClient.charge(gatewayReference);
+    // Con PayPal configurado la compra queda PENDIENTE hasta que el pago se
+    // apruebe (las horas se acreditan en PaypalPaymentsService).
+    const awaitsOnlinePayment = this.paypalClient.isConfigured && amount > 0;
+    const gatewayResult = awaitsOnlinePayment ? { succeeded: false } : this.gatewayClient.charge(gatewayReference);
     return this.txRepo.save(
       this.txRepo.create({
         package_id: pkg.id,
@@ -179,7 +191,11 @@ export class TransactionsService {
         student_id: studentId,
         tutor_id: null,
         amount,
-        status: gatewayResult.succeeded ? TransactionStatus.SUCCEEDED : TransactionStatus.FAILED,
+        status: awaitsOnlinePayment
+          ? TransactionStatus.PENDING
+          : gatewayResult.succeeded
+            ? TransactionStatus.SUCCEEDED
+            : TransactionStatus.FAILED,
         commission_rate: 0,
         commission_amount: 0,
         tutor_net_amount: 0,
