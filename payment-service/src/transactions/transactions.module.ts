@@ -8,6 +8,9 @@ import { TransactionsService } from "./transactions.service";
 import { TransactionsController } from "./transactions.controller";
 import { GatewayClient } from "./gateway.client";
 import { CatalogServiceClient } from "./catalog-service.client";
+import { PaypalClient } from "./paypal.client";
+import { PaypalPaymentsService } from "./paypal-payments.service";
+import { PaypalController } from "./paypal.controller";
 import { EventsModule } from "../events/events.module";
 import { JwtConfigModule } from "../common/jwt-config.module";
 
@@ -22,8 +25,9 @@ import { JwtConfigModule } from "../common/jwt-config.module";
     forwardRef(() => EventsModule),
     JwtConfigModule,
   ],
-  providers: [TransactionsService, GatewayClient, CatalogServiceClient],
-  controllers: [TransactionsController],
-  exports: [TransactionsService],
+  providers: [TransactionsService, GatewayClient, CatalogServiceClient, PaypalClient, PaypalPaymentsService],
+  controllers: [TransactionsController, PaypalController],
+  exports: [TransactionsService, PaypalClient, PaypalPaymentsService],
 })
 export class TransactionsModule {}
+
