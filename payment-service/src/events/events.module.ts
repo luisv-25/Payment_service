@@ -48,7 +48,7 @@ import { TransactionsModule } from "../transactions/transactions.module";
         transport: Transport.RMQ,
         options: {
           urls: [process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672"],
-          queue: "payment_analytics_queue",
+          queue: "analytics_events_queue",
           queueOptions: { durable: true },
         },
       },
